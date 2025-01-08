@@ -5,6 +5,11 @@ import os
 from utils import *
 from scipy.spatial import KDTree
 import subprocess
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import xml.etree.ElementTree as ET
+from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d
 
 
 def extract_faces(unstructured_grid, output_file):
@@ -134,6 +139,7 @@ def plot_points(points):
     plotter = pv.Plotter()
     plotter.add_mesh(point_cloud, color="blue", point_size=5, render_points_as_spheres=True)
     plotter.show()
+
 def get_axial_positions(polydata):
     num_points = polydata.GetNumberOfPoints()
     axial_positions = np.zeros(num_points)
@@ -144,13 +150,43 @@ def get_axial_positions(polydata):
 
     return axial_positions
 
-def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, thickness_vector, radial_layers, output_file):
+def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_transfer_results, thickness_vector, radial_layers, output_file):
     # Create an array to store the new points
-    axial_positions = get_axial_positions(polydata)
-
+    
     num_points = polydata.GetNumberOfPoints()
+    points_wall = polydata.GetPoints().GetData()
     all_points = np.zeros(((radial_layers+1)*num_points, 7))
-    thickness_values = np.interp(axial_positions, np.linspace(axial_positions.min(), axial_positions.max(), len(thickness_vector)), thickness_vector)
+
+    points_heat_transfer = heat_transfer_results.points
+    temperature_values = heat_transfer_results.point_data['Temperature'] 
+    temperatures_known = np.linspace(np.min(temperature_values), np.max(temperature_values), len(thickness_vector))
+    thickness_values_known = thickness_vector
+
+    thickness_interp = interp1d(temperatures_known, thickness_values_known, kind='cubic', fill_value="extrapolate")
+
+    threshold_distance = 0.0001 
+
+    tree = KDTree(points_wall)
+
+    distances, indices = tree.query(points_heat_transfer)
+
+    inner_wall_indices = np.where(distances < threshold_distance)[0]
+ 
+    temperature_values_inner_wall = heat_transfer_results.point_data['Temperature'][inner_wall_indices]
+
+    node_thicknesses = thickness_interp(temperature_values_inner_wall)
+
+    inner_wall_points = points_heat_transfer[inner_wall_indices]  
+
+    inner_wall_mesh = pv.PolyData(inner_wall_points)
+
+
+    inner_wall_mesh.point_data['Thickness'] = node_thicknesses
+
+    # # Plot the mesh with the thickness as the scalar value
+    # plotter = pv.Plotter()
+    # plotter.add_mesh(inner_wall_mesh, scalars='Thickness', cmap='viridis', show_edges=True)
+    # plotter.show()
     
     ids = np.zeros(((radial_layers+1)*num_points),  dtype=int)
     prism_connectivity = []
@@ -185,7 +221,7 @@ def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, thicknes
         
 
         for j in range(num_points):
-            thickness = thickness_values[j] * factor
+            thickness = node_thicknesses[j] * factor
             point = polydata.GetPoint(j)
             normal = normals.GetTuple(j)
 
@@ -232,9 +268,7 @@ def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, thicknes
             elif len(num_cell_points)==4: # Quadrilateral cells
                 print("Quadrilateral cells is not implemented yet")              
                     # Convert all_points to a NumPy array
-    
-    
-   
+       
     # Convert points to VTK format
     all_points_coordinates  = all_points[:,1:4]
     #plot_points(all_points_coordinates)
@@ -409,11 +443,11 @@ def saveSolid(vol,surf,output_dir):
 
         proximal = thresholdModelNew(surf, "ModelFaceID",0.5,1.5)
         proximal_polydata = convert_to_polydata(proximal)  # Convert to vtkPolyData
-        save_data(output_dir + '/mesh-surfaces/wall_inlet.vtp',proximal_polydata)
+        save_data(output_dir + '/mesh-surfaces/wall_inner.vtp',proximal_polydata)
 
         inner = thresholdModelNew(surf, 'ModelFaceID',1.5,2.5)
         inner_polydata = convert_to_polydata(inner)
-        save_data(output_dir + '/mesh-surfaces/wall_inner.vtp',inner_polydata)
+        save_data(output_dir + '/mesh-surfaces/wall_inlet.vtp',inner_polydata)
 
         distal = thresholdModelNew(surf, "ModelFaceID", 2.5, 3.5)
         distal_polydata = convert_to_polydata(distal)
@@ -450,28 +484,58 @@ def run_script_with_sv(python_sv,extract_faces_script, faces_file, output_dir):
         print("Error:", e)
         print("Error Output:\n", e.stderr)
 
+def read_pathlines(pathlines_file):
+# Load and parse the XML file
+    tree = ET.parse(pathlines_file)
+    root = tree.getroot()
+
+    # Extract control points
+    control_points = []
+    for point in root.findall(".//control_points/point"):
+        x = float(point.get("x"))
+        y = float(point.get("y"))
+        z = float(point.get("z"))
+        control_points.append((x, y, z))
+
+    # Extract path points
+    path_points = []
+    for path_point in root.findall(".//path_points/path_point"):
+        pos = path_point.find("pos")
+        x = float(pos.get("x"))
+        y = float(pos.get("y"))
+        z = float(pos.get("z"))
+        path_points.append((x, y, z))
+
+    # Example output
+    print("Control Points (first 5):", control_points[:5])
+    print("Path Points (first 5):", path_points[:5])
+
+    return control_points, path_points
+    
 def main():
 
     current_directory = os.getcwd()
     python_sv = "/home/bazzi/repo/SimVascular-Ubuntu-20-2023-05/data/usr/local/sv/simvascular/2023-03-27/simvascular"
     extract_faces_script = current_directory + "/get_faces_with_sv.py"
-    
+
+    heat_transfer_results = pv.read('heat_transfer/result_002.vtu')
+    pathlines_file = current_directory + "/Sheep/IVC.pth"
     surface = current_directory + "/lumen-mesh-complete/mesh-surfaces/lumen_wall.vtp"
     output_file = current_directory + "/solid-mesh-complete/wall.vtu"
     faces_file = current_directory +  "/solid-mesh-complete/wall_faces.vtp"
     output_dir = current_directory + "/solid-mesh-complete"
     
     radial_layers = 4
-    thickness_vector = [7e-1, 2e-1, .5e-1, 2e-1, 3e-1, 5e-1]
+    thickness_vector =np.array([0.07, 0.0756, 0.08, 0.085])
 
-    #extrat the normals to each point in the surface and read the face mesh 
+    # #extrat the normals to each point in the surface and read the face mesh 
     polydata, normals = point_normals(surface)
     
-    # use the normals to generate a prismatic mesh starting from the surface mesh (polydata) return the volume mesh (vol)
-    #vol, all_points = generate_prismatic_mesh_vtu(polydata, normals, 0.1, radial_layers, output_file)
-    vol, all_points =  generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, thickness_vector, radial_layers, output_file)
+    # # use the normals to generate a prismatic mesh starting from the surface mesh (polydata) return the volume mesh (vol)
+    # #vol, all_points = generate_prismatic_mesh_vtu(polydata, normals, 0.1, radial_layers, output_file)
+    vol, all_points =  generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_transfer_results, thickness_vector, radial_layers, output_file)
 
-    # Add GlobalNodeID and GlobalElementID to the volume mesh
+    # # Add GlobalNodeID and GlobalElementID to the volume mesh
     global_ids = all_points[:,0]
     coordinates = all_points[:,1:4]
     numCells = vol.GetNumberOfCells()
@@ -479,16 +543,16 @@ def main():
     vol.GetPointData().AddArray(pv.convert_array(global_ids.astype(np.int32),name="GlobalNodeID"))
     vol.GetCellData().AddArray(pv.convert_array(np.linspace(1,numCells,numCells).astype(np.int32),name="GlobalElementID"))
 
-    #extract the faces without ids from the volume mesh (vol) and save it to wall_faces.vtp
+    # #extract the faces without ids from the volume mesh (vol) and save it to wall_faces.vtp
     extract_faces(vol, faces_file)
 
-    #run the python wrap in SimVascular to extract the faces from the volume mesh (vol) and save it to wall_faces_with_ids.vtp"
+    # #run the python wrap in SimVascular to extract the faces from the volume mesh (vol) and save it to wall_faces_with_ids.vtp"
     run_script_with_sv(python_sv, extract_faces_script, faces_file, output_dir)
 
-    #read faces mesh (surfaces_with_ids) 
+    # #read faces mesh (surfaces_with_ids) 
     surfaces_with_ids = pv.read(output_dir + "/wall_faces_with_ids.vtp")
     
-    # split and save all the faces in the surface-mesh and the volume mesh as mesh-complete.mesh.vtu
+    # # split and save all the faces in the surface-mesh and the volume mesh as mesh-complete.mesh.vtu
     saveSolid(vol,surfaces_with_ids,output_dir)
 
 if __name__ == "__main__":
