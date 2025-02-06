@@ -161,10 +161,12 @@ def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_tra
     temperature_values = heat_transfer_results.point_data['Temperature'] 
     temperatures_known = np.linspace(np.min(temperature_values), np.max(temperature_values), len(thickness_vector))
     thickness_values_known = thickness_vector
+    # Smooth input thickness values
+    smoothed_thickness = gaussian_filter1d(thickness_values_known, sigma=1)
 
-    thickness_interp = interp1d(temperatures_known, thickness_values_known, kind='cubic', fill_value="extrapolate")
+    thickness_interp = interp1d(temperatures_known, smoothed_thickness, kind='cubic', fill_value="extrapolate")
 
-    threshold_distance = 0.0001 
+    threshold_distance = 0.01 
 
     tree = KDTree(points_wall)
 
@@ -176,6 +178,14 @@ def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_tra
 
     node_thicknesses = thickness_interp(temperature_values_inner_wall)
 
+    z_positions = points_heat_transfer[:, 2]
+    outlet_threshold = z_positions.max() - 0.05  # Define the threshold for the last 5% of the domain
+    outlet_region = z_positions > outlet_threshold
+    node_thicknesses[outlet_region] = np.linspace(
+    node_thicknesses[outlet_region].min(),
+    node_thicknesses[outlet_region].mean(),
+    outlet_region.sum())
+
     inner_wall_points = points_heat_transfer[inner_wall_indices]  
 
     inner_wall_mesh = pv.PolyData(inner_wall_points)
@@ -183,10 +193,10 @@ def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_tra
 
     inner_wall_mesh.point_data['Thickness'] = node_thicknesses
 
-    # # Plot the mesh with the thickness as the scalar value
-    # plotter = pv.Plotter()
-    # plotter.add_mesh(inner_wall_mesh, scalars='Thickness', cmap='viridis', show_edges=True)
-    # plotter.show()
+    # Plot the mesh with the thickness as the scalar value
+    plotter = pv.Plotter()
+    plotter.add_mesh(inner_wall_mesh, scalars='Thickness', cmap='viridis', show_edges=True)
+    plotter.show()
     
     ids = np.zeros(((radial_layers+1)*num_points),  dtype=int)
     prism_connectivity = []
@@ -218,7 +228,6 @@ def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_tra
     for i in range(radial_layers):
         c = i+1
         factor = c / (radial_layers)  # Scale factor for radial layers
-        
 
         for j in range(num_points):
             thickness = node_thicknesses[j] * factor
@@ -226,9 +235,9 @@ def generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_tra
             normal = normals.GetTuple(j)
 
             # Calculate the offset point
-            xPt = point[0] + factor * thickness * (normal[0])
-            yPt = point[1] + factor * thickness * (normal[1])
-            zPt = point[2] + factor * thickness * (normal[2])
+            xPt = point[0] +  thickness * (normal[0])
+            yPt = point[1] +  thickness * (normal[1])
+            zPt = point[2] +  thickness * (normal[2])
             
             all_points[num_points*c+j,0] = all_points[num_points*i+j,0]+num_points*c
             all_points[num_points*c+j,1] = xPt
@@ -518,22 +527,23 @@ def main():
     python_sv = "/home/bazzi/repo/SimVascular-Ubuntu-20-2023-05/data/usr/local/sv/simvascular/2023-03-27/simvascular"
     extract_faces_script = current_directory + "/get_faces_with_sv.py"
 
-    heat_transfer_results = pv.read('heat_transfer/result_002.vtu')
-    pathlines_file = current_directory + "/Sheep/IVC.pth"
-    surface = current_directory + "/lumen-mesh-complete/mesh-surfaces/lumen_wall.vtp"
-    output_file = current_directory + "/solid-mesh-complete/wall.vtu"
-    faces_file = current_directory +  "/solid-mesh-complete/wall_faces.vtp"
-    output_dir = current_directory + "/solid-mesh-complete"
+    # heat_transfer_results = pv.read('heat_transfer/result_002.vtu')
+    # pathlines_file = current_directory + "/Sheep/IVC.pth"
+    surface = current_directory + "/mesh/refined_es_006/fluid/mesh-surfaces/lumen_wall.vtp"
+    output_file = current_directory + "/mesh/refined_es_006/solid/wall.vtu"
+    faces_file = current_directory +  "/mesh/refined_es_006/solid/wall_faces.vtp"
+    output_dir = current_directory + "/mesh/refined_es_006/solid"
     
     radial_layers = 4
-    thickness_vector =np.array([0.07, 0.0756, 0.08, 0.085])
+    thickness_vector = np.mean([0.119, 0.113, 0.109, 0.109])
 
     # #extrat the normals to each point in the surface and read the face mesh 
     polydata, normals = point_normals(surface)
     
     # # use the normals to generate a prismatic mesh starting from the surface mesh (polydata) return the volume mesh (vol)
-    # #vol, all_points = generate_prismatic_mesh_vtu(polydata, normals, 0.1, radial_layers, output_file)
-    vol, all_points =  generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_transfer_results, thickness_vector, radial_layers, output_file)
+    
+    vol, all_points = generate_prismatic_mesh_vtu(polydata, normals, thickness_vector, radial_layers, output_file) #thickness_vector is a scalar value
+    #vol, all_points =  generate_prismatic_mesh_vtu_nonuniform_thickness(polydata, normals, heat_transfer_results, thickness_vector, radial_layers, output_file)
 
     # # Add GlobalNodeID and GlobalElementID to the volume mesh
     global_ids = all_points[:,0]
